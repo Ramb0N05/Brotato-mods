@@ -148,12 +148,30 @@ func load_custom_tracks() -> void:
 	ogg_files.sort()
 
 	for ogg_file in ogg_files:
+		var full_path = MUSIC_IMPORT_DIR.plus_file(ogg_file)
 		var stream = AudioStreamOGGVorbis.new()
+		var file = File.new()
 
-		if stream.load_from_file(MUSIC_IMPORT_DIR.plus_file(ogg_file)) == OK:
-			_custom_tracks.append(stream)
+		if file.open(full_path, File.READ) != OK:
+			ModLoaderLog.error("Cannot open track: " + ogg_file, RobocrafterLP_CustomMusic_LOG_NAME)
+			continue
+
+		var bytes = file.get_buffer(file.get_len())
+		file.close()
+
+		# 1.0.1 fix: stream.load_from_file() returns OK in Brotato's Godot
+		# 3.7.dev build but produces a stream WITHOUT data ("This
+		# AudioStreamOGGVorbis does not have an audio file assigned to it"
+		# at instance_playback). The canonical way is reading the bytes and
+		# assigning the "data" property: set_data() validates the vorbis
+		# stream inside the engine and leaves data empty on invalid input.
+		stream.data = bytes
+
+		if stream.data.empty():
+			ModLoaderLog.error("Track is not valid OGG Vorbis (renamed MP3/Opus?), skipped: " + ogg_file, RobocrafterLP_CustomMusic_LOG_NAME)
 		else:
-			ModLoaderLog.error("Failed to load track: " + ogg_file, RobocrafterLP_CustomMusic_LOG_NAME)
+			_custom_tracks.append(stream)
+			ModLoaderLog.info("Loaded track: " + ogg_file + " (" + str(bytes.size()) + " bytes)", RobocrafterLP_CustomMusic_LOG_NAME)
 
 	if not ignored_files.empty():
 		ModLoaderLog.warning("Ignored (not .ogg): " + str(ignored_files), RobocrafterLP_CustomMusic_LOG_NAME)

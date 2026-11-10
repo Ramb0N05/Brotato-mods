@@ -1,7 +1,7 @@
 {
 	"name": "CustomMusic",
 	"namespace": "RobocrafterLP",
-	"version_number": "1.0.0",
+	"version_number": "1.0.1",
 	"description": "Loads custom music (.ogg) from a folder, replaces or extends the original soundtrack. Endless playlist.",
 	"website_url": "",
 	"dependencies": ["dami-ModOptions"],
