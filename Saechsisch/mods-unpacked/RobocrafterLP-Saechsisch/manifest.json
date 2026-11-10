@@ -1,0 +1,24 @@
+{
+	"name": "Saechsisch",
+	"namespace": "RobocrafterLP",
+	"version_number": "1.0.2",
+	"description": "Sächsisch/Erzgebirgisch Sprachpaket: alle Item- und Waffennamen, Gegner, Effekte, Aufgaben und das komplette UI (Menüs, Coop, Codex, Profile) sächsisch - inkl. Abyssal Terrors, Paws & Claws und Primal Dread. Nicht Übersetztes fällt auf Deutsch zurück. Veel Dankesche!",
+	"website_url": "",
+	"dependencies": [],
+	"extra": {
+		"godot": {
+			"incompatibilities": [],
+			"authors": [
+				"RobocrafterLP"
+			],
+			"compatible_mod_loader_version": [
+				"6.3.0"
+			],
+			"compatible_game_version": [
+				"1.2.0.1"
+			],
+			"config_defaults": {},
+			"config_schema": {}
+		}
+	}
+}
