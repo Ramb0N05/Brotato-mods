@@ -14,7 +14,7 @@ func _ready()->void :
 		if _player_index != player_index:
 			var test = _take_button.get_stylebox("normal").duplicate()
 			var button = _take_button.duplicate()
-			button.text = "TRADE_GIVE_TO_PLAYER_BUTTON_%s" % str(player_index + 1)
+			button.text = "TRADE_GIVE_TO_PLAYER_BUTTON_%s" % str(_player_index + 1)
 			button.name = "%%_p%s" % (_player_index + 1)
 			button.disconnect("pressed", self, "_on_TakeButton_pressed")
 			button.connect("pressed", self, "_on_item_trade_button_pressed" + str(_player_index + 1))
