@@ -26,6 +26,19 @@ extends CoopItemPopup
 #  - 1.3.1: trade button states now also refresh while the popup is open via a
 #    light timer, so buttons disable/enable in time when OTHER players fill or
 #    free their weapon/item slots mid-shopping.
+#  - 1.3.2: limited items (max_nb != -1) count the receiver's CURRENT shop shelf
+#    copies against the receive check. Vanilla excludes limited items only from
+#    future rolls (owned + locked count) and never re-checks max_nb at purchase
+#    time; receiving a copy via trade while the shelf still offers the same
+#    item would therefore allow buying over max_nb. With the shelf rule the
+#    trade is blocked instead, keeping the receiver at/below max_nb.
+#  - 1.3.2: mirror parity. Vanilla base_shop.buy_item consumes an item with a
+#    duplicate_item effect (Spiked Mirror) when an item is bought and
+#    duplicates the bought item (cap: remaining max_nb, one slot reserved for
+#    the bought copy). The trade path now replicates that for item trades.
+#    Purchase-time one-shot effects still do NOT fire on trades
+#    (they live in buy_item, not in RunData.add_item), which is why the
+#    classic on-receive problem items stay on the NO_TRADE_ITEM_IDS list.
 
 signal weapon_trade_button_pressed_coop(weapon_data, from_player_index, to_player_index)
 signal item_trade_button_pressed_coop(item_data, from_player_index, to_player_index)
@@ -415,13 +428,66 @@ func _can_trade_to(item_data, target_player_index: int) -> bool:
 	if item_data is ItemData:
 		if not RunData.is_can_trade_item(item_data, target_player_index):
 			return false
+		# TRADE_ITEMS_OVER_LIMIT explicitly allows receiving over the limit:
+		# skip the strict vanilla-parity checks (incl. the shop shelf rule).
+		if RunData.get("is_trade_items_over_limit") == true:
+			return true
 		return _can_item_be_received(item_data, target_player_index)
 	return false
 
 
 func _can_item_be_received(item_data: ItemData, target_player_index: int) -> bool:
 	var remaining = RunData.get_remaining_max_nb_item(item_data, target_player_index)
-	return remaining > 0 or remaining == -1
+	if item_data.max_nb != -1:
+		# The receiver's shop shelf can already offer the same limited item
+		# (rolled before the trade happened). Vanilla only excludes limited
+		# items from future rolls (owned + locked count, item_service
+		# get_limited_items) and never re-checks max_nb at purchase time, so
+		# receiving a copy while the shelf offers one would allow buying over
+		# max_nb. The shelf copy therefore counts against the receiver's
+		# remaining slots for trades.
+		var shelf_count = _get_target_shelf_item_count(item_data, target_player_index)
+		remaining = max(0, remaining - shelf_count)
+	return remaining > 0
+
+
+func _get_target_shelf_item_count(item_data: ItemData, target_player_index: int) -> int:
+	# Copies of item_data currently displayed on the target's shop shelf
+	# (locked or not; ShopItem.item_data), same id.
+	var container = _get_player_container(target_player_index)
+	if container == null:
+		return 0
+	var shop_items_container = container.get("shop_items_container")
+	if shop_items_container == null:
+		return 0
+	var shop_items = shop_items_container.get("_shop_items")
+	if not (shop_items is Array):
+		return 0
+	var count := 0
+	for shop_item in shop_items:
+		if shop_item == null:
+			continue
+		var shelf_item = shop_item.get("item_data")
+		if shelf_item is ItemData and shelf_item.my_id_hash == item_data.my_id_hash:
+			count += 1
+	return count
+
+
+func _get_trade_block_reason(item_data, target_player_index: int) -> String:
+	# Human-readable reason for the abort log line.
+	if item_data is WeaponData:
+		if not _target_has_free_weapon_slot(item_data, target_player_index):
+			return "weapon slots full"
+		return "weapon not eligible"
+	if item_data is ItemData:
+		if not RunData.is_can_trade_item(item_data, target_player_index):
+			return "item over max_nb (receiver)"
+		if item_data.max_nb != -1 and _get_target_shelf_item_count(item_data, target_player_index) > 0:
+			var remaining = RunData.get_remaining_max_nb_item(item_data, target_player_index)
+			if remaining - _get_target_shelf_item_count(item_data, target_player_index) <= 0:
+				return "item over max_nb (receiver shop offers it)"
+		return "item not eligible"
+	return "not tradeable"
 
 
 # ---------------------------------------------------------------- focus wiring
@@ -648,7 +714,7 @@ func _execute_trade(item_data, to_player_index: int) -> void:
 	if not _is_valid_trade_target(own_index, to_player_index):
 		return
 	if not _can_trade_to(item_data, to_player_index):
-		ModLoaderLog.info("trade: target P%d cannot receive '%s', aborted." % [to_player_index + 1, item_data.my_id], LOG_NAME)
+		ModLoaderLog.info("trade: target P%d cannot receive '%s' (%s), aborted." % [to_player_index + 1, item_data.my_id, _get_trade_block_reason(item_data, to_player_index)], LOG_NAME)
 		return
 
 	var is_weapon := item_data is WeaponData
@@ -799,6 +865,28 @@ func _transfer_item(item_data: ItemData, from_player_index: int, to_player_index
 		var tracked_values = RunData.get_player_effect(effect.key_hash, from_player_index)
 		if not tracked_values.empty():
 			tracked_values.resize(0)
+
+	# Mirror parity (vanilla base_shop.buy_item): if the receiver owns an item
+	# with a duplicate_item effect (e.g. Spiked Mirror), receiving this item
+	# consumes the mirror and duplicates the received item. Vanilla caps the
+	# duplicates at the receiver's remaining max_nb (one slot is reserved for
+	# the received copy itself). Purchase-time one-shot effects are NOT
+	# triggered by this path (they live in buy_item, not in RunData.add_item).
+	var were_items_duplicated := false
+	var duplicate_item_effects: Array = RunData.get_player_effect(Keys.duplicate_item_hash, to_player_index)
+	for duplicate_item_effect in duplicate_item_effects:
+		var remaining_item_count: int = RunData.get_remaining_max_nb_item(item_data, to_player_index)
+		var value: int = duplicate_item_effect[1]
+		var duplicated_count: int = min(value, remaining_item_count - 1)
+		for _nb in range(duplicated_count):
+			var source_item = RunData.get_player_item(duplicate_item_effect[0], to_player_index)
+			if source_item == null:
+				break
+			were_items_duplicated = true
+			RunData.remove_item(source_item, to_player_index)
+			RunData.add_item(item_data, to_player_index)
+	if were_items_duplicated:
+		ModLoaderLog.info("trade: mirror duplicated '%s' for P%d" % [item_data.my_id, to_player_index + 1], LOG_NAME)
 
 	RunData.add_item(item_data, to_player_index)
 
