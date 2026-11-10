@@ -17,6 +17,15 @@ extends CoopItemPopup
 #  - Weapon eligibility uses the int effect keys (Keys.*_hash) as required since
 #    1.1; the old string-key copy of _can_weapon_be_bought crashed at runtime and
 #    made weapon trades impossible.
+#  - 1.3.1: strict slot rule for weapon trades. RunData.player_has_weapon_slots()
+#    only checks whether the weapon_slot effect is > 0, NOT whether a slot is
+#    free, so it is useless as a full-slots guard. The real check is vanilla
+#    has_weapon_slot_available(weapon, player_index) (free slots + melee/ranged
+#    caps + duplicate rule). Trading a duplicate onto a full player is NOT a
+#    combine (add_weapon just appends a copy), so it is blocked now.
+#  - 1.3.1: trade button states now also refresh while the popup is open via a
+#    light timer, so buttons disable/enable in time when OTHER players fill or
+#    free their weapon/item slots mid-shopping.
 
 signal weapon_trade_button_pressed_coop(weapon_data, from_player_index, to_player_index)
 signal item_trade_button_pressed_coop(item_data, from_player_index, to_player_index)
@@ -54,6 +63,7 @@ func _trade_ready() -> void:
 	if not _is_coop():
 		return
 	_ensure_trade_buttons()
+	_start_trade_state_refresh()
 
 
 func _is_coop() -> bool:
@@ -103,6 +113,84 @@ func should_show_buttons(item_data: ItemParentData, focused: bool) -> bool:
 		var enabled = get("buttons_enabled")
 		return (enabled == null or bool(enabled)) and focused
 	return .should_show_buttons(item_data, focused)
+
+
+# ---------------------------------------------------------------- live refresh
+# Trade button states must also follow changes made by OTHER players (e.g. the
+# target buys a weapon and fills their last slot while this popup is open).
+# RunData emits no weapon/item-added signal, so a light timer polls while the
+# popup is visible. The interval is far below human reaction time and the check
+# is cheap (vanilla itself polls RunData every physics frame for stats_updated).
+
+const TRADE_STATE_REFRESH_INTERVAL := 0.25
+
+
+func _start_trade_state_refresh() -> void:
+	if get_node_or_null("TradeStateRefreshTimer") != null:
+		return
+	var timer := Timer.new()
+	timer.name = "TradeStateRefreshTimer"
+	timer.wait_time = TRADE_STATE_REFRESH_INTERVAL
+	timer.autostart = true
+	timer.connect("timeout", self, "_on_trade_state_refresh_tick")
+	add_child(timer)
+
+
+func _on_trade_state_refresh_tick() -> void:
+	if not is_inside_tree() or not is_visible_in_tree() or not _is_coop():
+		return
+	if _trade_buttons.empty():
+		return
+	var enabled = get("buttons_enabled")
+	var focused = get("_focused")
+	if enabled == null or not bool(enabled) or focused == null or not bool(focused):
+		return
+	var item_data = get("_item_data")
+	if item_data == null or not _is_tradeable(item_data):
+		return
+
+	var changed := false
+	for target_index in _trade_buttons.keys():
+		var trade_button: Button = _trade_buttons[target_index]
+		if not is_instance_valid(trade_button):
+			continue
+		var can_trade := _can_trade_to(item_data, target_index)
+		if trade_button.disabled == can_trade:
+			changed = true
+		trade_button.disabled = not can_trade
+		trade_button.focus_mode = Control.FOCUS_ALL if can_trade else Control.FOCUS_NONE
+		trade_button.modulate = Color(1, 1, 1, 1) if can_trade else Color(0.5, 0.5, 0.5, 1)
+
+	if not changed:
+		return
+
+	# A trade button that just became disabled may still hold this player's
+	# focus: hand focus over before rewiring the chains.
+	var focused_control = _get_player_focused_control(player_index)
+	if focused_control is Button and _trade_buttons.values().has(focused_control) and focused_control.disabled:
+		var focus_buttons = _get_focusable_trade_buttons()
+		var fallback = focus_buttons[0] if not focus_buttons.empty() else get("_cancel_button")
+		if fallback is Button and fallback.visible:
+			_focus_control_for_player(fallback, player_index)
+
+	if item_data is WeaponData:
+		_wire_weapon_trade_focus()
+	else:
+		_wire_item_trade_focus()
+
+
+func _get_player_focused_control(player_index: int):
+	if not Utils.has_method("get_focus_emulator"):
+		return null
+	var focus_emulator = Utils.get_focus_emulator(player_index)
+	if focus_emulator == null:
+		return null
+	return focus_emulator.get("focused_control")
+
+
+func _focus_control_for_player(control: Control, player_index: int) -> void:
+	if Utils.has_method("focus_player_control"):
+		Utils.focus_player_control(control, player_index)
 
 
 # ---------------------------------------------------------------- button creation
@@ -509,14 +597,7 @@ func _can_weapon_be_received(weapon_data: WeaponData, player_index: int) -> bool
 	var lock_current_weapons = RunData.get_player_effect_bool(Keys.lock_current_weapons_hash, player_index)
 
 	var weapon_type = weapon_data.type
-	var weapons = RunData.get_player_weapons(player_index)
 	var weapon_slot_available: bool = RunData.has_weapon_slot_available(weapon_data, player_index)
-
-	var player_has_weapon := false
-	for weapon in weapons:
-		if weapon.my_id == weapon_data.my_id:
-			player_has_weapon = true
-			break
 
 	var player_has_weapon_family := false
 	if weapon_data.weapon_id in RunData.get_unique_weapon_ids(player_index):
@@ -534,16 +615,31 @@ func _can_weapon_be_received(weapon_data: WeaponData, player_index: int) -> bool
 	if lock_current_weapons and not weapon_slot_available:
 		return false
 
-	if player_has_weapon and not weapon_slot_available and weapon_data.upgrades_into != null and weapon_data.upgrades_into.tier <= max_weapon_tier:
-		return true
-
 	if no_duplicate_weapons and player_has_weapon_family:
 		return false
 
+	# Strict slot rule: vanilla has_weapon_slot_available() covers free slots,
+	# the melee/ranged caps and the no-duplicate rule. Handing a duplicate to a
+	# full player is NOT a combine (add_weapon just appends a copy and the target
+	# would end up over the slot limit), so it has to be blocked.
 	return weapon_slot_available
 
 
 # ---------------------------------------------------------------- transfer
+
+func _target_has_free_weapon_slot(weapon: WeaponData, target_player_index: int) -> bool:
+	# The real "can receive this weapon" check. Vanilla has_weapon_slot_available()
+	# covers free slots, the melee/ranged caps and the no-duplicate rule.
+	# Do NOT use RunData.player_has_weapon_slots() here: it only checks whether
+	# the weapon_slot effect is > 0 (i.e. the player can hold weapons at all),
+	# not whether a slot is free, so it never blocked overfull trades.
+	if RunData.has_method("has_weapon_slot_available"):
+		return RunData.has_weapon_slot_available(weapon, target_player_index)
+	# Fallback if the API changes again: count vs the weapon_slot effect.
+	var weapons = RunData.get_player_weapons(target_player_index)
+	var weapon_slots = RunData.get_player_effect(Keys.weapon_slot_hash, target_player_index)
+	return weapons.size() < weapon_slots
+
 
 func _execute_trade(item_data, to_player_index: int) -> void:
 	if item_data == null:
@@ -646,7 +742,7 @@ func _transfer_weapon(weapon: WeaponData, from_player_index: int, to_player_inde
 	if not (RunData.has_method("remove_weapon") and RunData.has_method("add_weapon")):
 		ModLoaderLog.error("trade: RunData.remove_weapon/add_weapon unavailable. Aborted.", LOG_NAME)
 		return false
-	if RunData.has_method("player_has_weapon_slots") and not RunData.player_has_weapon_slots(to_player_index):
+	if not _target_has_free_weapon_slot(weapon, to_player_index):
 		ModLoaderLog.info("trade: target P%d weapon slots full, aborted." % (to_player_index + 1), LOG_NAME)
 		return false
 
