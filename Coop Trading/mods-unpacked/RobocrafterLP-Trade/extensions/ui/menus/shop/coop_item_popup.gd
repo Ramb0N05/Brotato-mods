@@ -38,25 +38,28 @@ extends CoopItemPopup
 #    the bought copy). The trade path now replicates that for item trades.
 #    Purchase-time one-shot effects still do NOT fire on trades
 #    (they live in buy_item, not in RunData.add_item), which is why the
-#    classic on-receive problem items stay on the NO_TRADE_ITEM_IDS list.
+#    classic on-receive problem items stay on the no-trade list.
+#  - 1.3.3: shared trade rules. The no-trade list, the deferred next-wave
+#    block and the exemptions now live in the RunData extension
+#    (TRADE_NO_TRADE_ITEM_IDS / TRADE_DEFERRED_NEXT_WAVE_KEYS /
+#    TRADE_DEFERRED_EXEMPT_ITEM_IDS) so the shop popup and the crate-opening
+#    dialog enforce the SAME rules. item_lure (Lockmittel) is tradeable now
+#    (its next-wave trigger is suppressed on both sides of a trade);
+#    item_weird_ghost (Seltsamer Geist) is tradeable and arms its 1-HP-next-
+#    wave trigger on the receiver while the sender is disarmed - trading it
+#    back and forth is intended.
+#  - 1.3.3: stats refresh after trades. Both players' stats containers are
+#    refreshed (vanilla buy parity: coop_shop._update_stats) and LinkedStats
+#    is reset for both players (item-count-scaled stats), mirroring the
+#    vanilla take flow in the upgrades UI.
 
 signal weapon_trade_button_pressed_coop(weapon_data, from_player_index, to_player_index)
 signal item_trade_button_pressed_coop(item_data, from_player_index, to_player_index)
 
 const LOG_NAME := "RobocrafterLP-Trade:CoopItemPopup"
 
-# Items with special per-player mounting/balance that must never change owner.
-# Hourglass excluded as well (same reasoning as the reference gift mod).
-const NO_TRADE_ITEM_IDS := ["item_celery_tea", "item_lure", "item_peacock", "item_hourglass"]
-
-# Effects that only apply on the next wave: trading them away mid-wave breaks them.
-const DEFERRED_NEXT_WAVE_KEYS := [
-	"hp_start_next_wave",
-	"extra_enemies_next_wave",
-	"extra_loot_aliens_next_wave",
-	"extra_elite_next_wave_chance",
-	"gain_random_primary_stats_on_go_to_next_wave"
-]
+# Tradeability rules (no-trade ids, deferred next-wave keys, exemptions)
+# live in the RunData extension since 1.3.3 - shared with the crate dialog.
 
 var _trade_buttons := {}
 var _vanilla_cancel_top := NodePath()
@@ -306,22 +309,14 @@ func _is_tradeable(item_data) -> bool:
 	if item_data is ItemData:
 		if "character" in item_data.my_id:
 			return false
-		if item_data.my_id in NO_TRADE_ITEM_IDS:
+		# Shared rules (1.3.3): no-trade ids + deferred next-wave block,
+		# both defined in the RunData extension (lure and weird ghost are
+		# exempted there by design).
+		if RunData.is_item_trade_restricted(item_data):
 			return false
-	if _has_deferred_next_wave_effect(item_data):
+	if RunData.is_item_deferred_next_wave_blocked(item_data):
 		return false
 	return true
-
-
-static func _has_deferred_next_wave_effect(item_data) -> bool:
-	if item_data == null or item_data.get("effects") == null:
-		return false
-	for effect in item_data.effects:
-		if effect.key in DEFERRED_NEXT_WAVE_KEYS:
-			return true
-		if effect.custom_key == "stats_next_wave":
-			return true
-	return false
 
 
 func _hide_all_trade_buttons() -> void:
@@ -764,6 +759,15 @@ func _is_valid_trade_target(source_player_index: int, target_player_index: int) 
 
 
 func _refresh_after_trade(from_player_index: int, to_player_index: int, is_weapon: bool) -> void:
+	# 1.3.3: item-count-scaled stats depend on LinkedStats; vanilla resets it
+	# in the take flow (upgrades UI) and RunData.add_item/remove_item only
+	# reset it per player internally - do it for both players here as well so
+	# the stats containers below always read fresh values.
+	if RunData.get_player_count() > from_player_index and from_player_index >= 0:
+		LinkedStats.reset_player(from_player_index)
+	if RunData.get_player_count() > to_player_index and to_player_index >= 0:
+		LinkedStats.reset_player(to_player_index)
+
 	# Target player: gear + stats + focus restore.
 	var target_container = _get_player_container(to_player_index)
 	var target_gear = target_container.get("player_gear_container") if target_container != null else null
@@ -802,6 +806,17 @@ func _refresh_after_trade(from_player_index: int, to_player_index: int, is_weapo
 		var shop_items = container.get("shop_items_container")
 		if shop_items != null and shop_items.has_method("reload_shop_items"):
 			shop_items.reload_shop_items()
+
+	# 1.3.3: stats fallback with vanilla buy parity. If a container probe
+	# failed above, use the shop's own refresh (base_shop calls
+	# _update_stats(player_index) after every buy/discard/reroll).
+	var shop = _find_ancestor("_ancestor_is_shop")
+	if shop != null and shop.has_method("_update_stats"):
+		if target_container == null:
+			shop.call("_update_stats", to_player_index)
+		if from_container == null:
+			shop.call("_update_stats", from_player_index)
+	ModLoaderLog.info("trade: stats refreshed for P%d -> P%d" % [from_player_index + 1, to_player_index + 1], LOG_NAME)
 
 
 func _transfer_weapon(weapon: WeaponData, from_player_index: int, to_player_index: int) -> bool:
@@ -866,6 +881,34 @@ func _transfer_item(item_data: ItemData, from_player_index: int, to_player_index
 		if not tracked_values.empty():
 			tracked_values.resize(0)
 
+	# 1.3.3 one-shot next-wave effect ownership fixes (sender side).
+	# Vanilla consumes and resets these effect values at wave start without
+	# re-applying them from still-owned items, so unapply after consumption
+	# corrupts the stored value. The sender must be neutralized explicitly.
+	var is_weird_ghost := item_data.my_id == "item_weird_ghost"
+	var is_lure := item_data.my_id == "item_lure"
+	var from_effects = RunData.get_player_effects(from_player_index)
+	if from_effects != null:
+		if is_weird_ghost and from_effects[Keys.hp_start_next_wave_hash] > 100:
+			# Consumed trigger + unapply pushed the value above the 100
+			# neutral default (the sender would start the next wave with
+			# DOUBLE max HP). Disarm back to 100.
+			from_effects[Keys.hp_start_next_wave_hash] = 100
+		if is_lure and from_effects[Keys.extra_loot_aliens_next_wave_hash] < 0:
+			# Consumed trigger + unapply pushed the value below the 0
+			# neutral default. Restore to 0.
+			from_effects[Keys.extra_loot_aliens_next_wave_hash] = 0
+
+	# Lockmittel (item_lure): receiving it via trade must NOT arm the
+	# extra_loot_aliens_next_wave trigger ("the effect does not fire on
+	# trades"). Remember the receiver's pre-trade value and restore it after
+	# the transfer; this also covers mirror-duplicated copies.
+	var lure_pre_value = null
+	if is_lure:
+		var to_effects_pre = RunData.get_player_effects(to_player_index)
+		if to_effects_pre != null:
+			lure_pre_value = to_effects_pre[Keys.extra_loot_aliens_next_wave_hash]
+
 	# Mirror parity (vanilla base_shop.buy_item): if the receiver owns an item
 	# with a duplicate_item effect (e.g. Spiked Mirror), receiving this item
 	# consumes the mirror and duplicates the received item. Vanilla caps the
@@ -889,6 +932,20 @@ func _transfer_item(item_data: ItemData, from_player_index: int, to_player_index
 		ModLoaderLog.info("trade: mirror duplicated '%s' for P%d" % [item_data.my_id, to_player_index + 1], LOG_NAME)
 
 	RunData.add_item(item_data, to_player_index)
+
+	if is_lure and lure_pre_value != null:
+		# Restore the receiver's next-wave loot alien value (undo the arming
+		# done by add_item and any mirror copies).
+		var to_effects_post = RunData.get_player_effects(to_player_index)
+		if to_effects_post != null and to_effects_post[Keys.extra_loot_aliens_next_wave_hash] != lure_pre_value:
+			to_effects_post[Keys.extra_loot_aliens_next_wave_hash] = lure_pre_value
+		ModLoaderLog.info("trade: lure next-wave effect suppressed for P%d" % (to_player_index + 1), LOG_NAME)
+	if is_weird_ghost:
+		# add_item armed the receiver's hp_start_next_wave trigger (-100%):
+		# the receiver starts the next wave at 1 HP, the sender is back at
+		# the 100 default. Trading the ghost back and forth moves the
+		# trigger between players (intended).
+		ModLoaderLog.info("trade: weird ghost trigger armed for P%d, disarmed for P%d" % [to_player_index + 1, from_player_index + 1], LOG_NAME)
 
 	# remove_item_displayed does not restore appearances displaced by higher
 	# priority items: rebuild the source player's look from its item list.

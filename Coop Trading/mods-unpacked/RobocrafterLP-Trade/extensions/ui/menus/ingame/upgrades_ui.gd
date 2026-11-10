@@ -21,6 +21,15 @@ func _on_item_trade_button_pressed(item_data:ItemParentData, to_player_index:int
 	
 	LinkedStats.reset_player(player_index)
 	_update_player_stats(player_index)
+	
+	# 1.3.3: the gift changes the RECEIVER's limited-item counts, so their
+	# stats panel and their queued extra crate items must be re-evaluated,
+	# exactly like vanilla does for a normal take (_on_take_button_pressed)
+	# where the taker and the item owner are the same player.
+	LinkedStats.reset_player(to_player_index)
+	_update_player_stats(to_player_index)
+	_recheck_extra_items(to_player_index)
+	
 	if not _extra_items_to_process[player_index]:
 		emit_signal("consumable_selected", consumable)
 		_showing_option[player_index] = null
