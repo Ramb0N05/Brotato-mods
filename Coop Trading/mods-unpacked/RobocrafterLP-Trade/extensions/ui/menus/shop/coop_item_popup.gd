@@ -52,6 +52,11 @@ extends CoopItemPopup
 #    refreshed (vanilla buy parity: coop_shop._update_stats) and LinkedStats
 #    is reset for both players (item-count-scaled stats), mirroring the
 #    vanilla take flow in the upgrades UI.
+#  - 1.3.4: parse fix. `var x := item_data.my_id == "..."` infers from an
+#    untyped field comparison, which the 1.2 GDScript parser rejects
+#    ("The assigned value doesn't have a set type") - this killed the whole
+#    script at load time. Both 1.3.3 guards use an explicit `: bool`
+#    annotation instead. No behaviour change.
 
 signal weapon_trade_button_pressed_coop(weapon_data, from_player_index, to_player_index)
 signal item_trade_button_pressed_coop(item_data, from_player_index, to_player_index)
@@ -885,8 +890,8 @@ func _transfer_item(item_data: ItemData, from_player_index: int, to_player_index
 	# Vanilla consumes and resets these effect values at wave start without
 	# re-applying them from still-owned items, so unapply after consumption
 	# corrupts the stored value. The sender must be neutralized explicitly.
-	var is_weird_ghost := item_data.my_id == "item_weird_ghost"
-	var is_lure := item_data.my_id == "item_lure"
+	var is_weird_ghost: bool = item_data.my_id == "item_weird_ghost"
+	var is_lure: bool = item_data.my_id == "item_lure"
 	var from_effects = RunData.get_player_effects(from_player_index)
 	if from_effects != null:
 		if is_weird_ghost and from_effects[Keys.hp_start_next_wave_hash] > 100:
