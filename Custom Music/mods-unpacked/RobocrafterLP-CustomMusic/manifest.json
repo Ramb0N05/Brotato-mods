@@ -1,0 +1,44 @@
+{
+	"name": "CustomMusic",
+	"namespace": "RobocrafterLP",
+	"version_number": "1.0.0",
+	"description": "Loads custom music (.ogg) from a folder, replaces or extends the original soundtrack. Endless playlist.",
+	"website_url": "",
+	"dependencies": ["dami-ModOptions"],
+	"extra": {
+		"godot": {
+			"incompatibilities": [
+			],
+			"authors": ["RobocrafterLP"],
+			"compatible_mod_loader_version": ["6.3.0"],
+			"compatible_game_version": ["1.2.0.1"],
+			"config_defaults": {},
+			"config_schema": {
+				"title": "Config_custom_music",
+				"description": "Config for custom music",
+				"type": "object",
+				"properties": {
+					"MUSIC_MODE": {
+						"type": "string",
+						"enum": ["Ersetzt Original-Tracks", "Erweitert Original-Tracks"],
+						"default": "Ersetzt Original-Tracks",
+						"title": "Musik-Modus",
+						"tooltip": "Ersetzt: nur eigene Tracks laufen. Erweitert: eigene Tracks laufen zusaetzlich zu den Original- und DLC-Tracks."
+					},
+					"SHUFFLE": {
+						"type": "boolean",
+						"default": true,
+						"title": "Shuffle",
+						"tooltip": "An: zufaellige Reihenfolge. Aus: feste Reihenfolge (Original-Tracks, dann eigene Tracks alphabetisch). Die Playlist laeuft in beiden Faellen endlos."
+					},
+					"MUSIC_IMPORT_PATH": {
+						"type": "boolean",
+						"default": false,
+						"title": "Import-Ordner: user://music",
+						"tooltip": "Eigene Musik als .ogg-Dateien in diesen Ordner legen und das Spiel neu starten. Umschalten oeffnet den Ordner im Dateimanager. MP3 wird nicht unterstuetzt (Godot 3) - vorher zu OGG konvertieren (z.B. ffmpeg -i in.mp3 -c:a libvorbis -q:a 5 out.ogg)."
+					}
+				}
+			}
+		}
+	}
+}
