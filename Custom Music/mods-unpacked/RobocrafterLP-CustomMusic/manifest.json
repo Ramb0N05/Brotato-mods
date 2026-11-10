@@ -1,7 +1,7 @@
 {
 	"name": "CustomMusic",
 	"namespace": "RobocrafterLP",
-	"version_number": "1.0.1",
+	"version_number": "1.1.0",
 	"description": "Loads custom music (.ogg) from a folder, replaces or extends the original soundtrack. Endless playlist.",
 	"website_url": "",
 	"dependencies": ["dami-ModOptions"],
@@ -30,6 +30,12 @@
 						"default": true,
 						"title": "Shuffle",
 						"tooltip": "An: zufaellige Reihenfolge. Aus: feste Reihenfolge (Original-Tracks, dann eigene Tracks alphabetisch). Die Playlist laeuft in beiden Faellen endlos."
+					},
+					"RESUME": {
+						"type": "boolean",
+						"default": true,
+						"title": "Wiedergabe fortsetzen",
+						"tooltip": "An: der zuletzt gespielte Track laeuft beim naechsten Spielstart ab der zuletzt gespeicherten Position weiter (Position wird alle paar Sekunden gespeichert). Aus: jede Session startet mit einem frischen Track."
 					},
 					"MUSIC_IMPORT_PATH": {
 						"type": "boolean",

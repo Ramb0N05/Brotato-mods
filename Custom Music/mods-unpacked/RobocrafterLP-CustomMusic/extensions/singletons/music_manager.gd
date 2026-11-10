@@ -12,6 +12,8 @@ extends "res://singletons/music_manager.gd"
 # - SHUFFLE: random order or fixed order (vanilla tracks first, then custom
 #   tracks alphabetically)
 # - MUSIC_IMPORT_PATH: display row, toggle opens the folder in the file manager
+# - RESUME: remember the last played track and its position; the next game
+#   start continues exactly there (position saved every few seconds)
 #
 # The playlist refills itself every cycle and repeats even with a single
 # track, no matter what is configured (endless repetition). Vanilla
@@ -32,12 +34,22 @@ const MUSIC_MODE_EXTEND := "Erweitert Original-Tracks"
 const CONFIG_KEY_MUSIC_MODE := "MUSIC_MODE"
 const CONFIG_KEY_SHUFFLE := "SHUFFLE"
 const CONFIG_KEY_IMPORT_PATH := "MUSIC_IMPORT_PATH"
+const CONFIG_KEY_RESUME := "RESUME"
+const RESUME_STATE_PATH := "user://custom_music_resume.cfg"
+const RESUME_SAVE_INTERVAL := 5.0
 
 var _config: ModConfig
 var _custom_tracks: Array = []
+var _track_names: Dictionary = {}
 var _play_queue: Array = []
 var _mode_replace: bool = true
 var _shuffle: bool = true
+var _resume_enabled: bool = true
+var _resume_track: String = ""
+var _resume_position: float = 0.0
+var _resume_applied: bool = false
+var _current_track_name: String = ""
+var _resume_save_timer: Timer
 
 
 # Extended func's
@@ -51,12 +63,21 @@ func _ready() -> void:
 
 	ensure_music_folder()
 	load_custom_tracks()
+	_load_resume_state()
+	_start_resume_save_timer()
 	ModLoaderLog.info("Custom music active (mode: " + ("Ersetzt" if _mode_replace else "Erweitert") + ", shuffle: " + ("an" if _shuffle else "aus") + ", tracks: " + str(_custom_tracks.size()) + ")", RobocrafterLP_CustomMusic_LOG_NAME)
 
 
 # Fully replaces vanilla play(): the queue refills itself every cycle,
-# so the music never stops, no matter the settings.
+# so the music never stops, no matter the settings. On the very first
+# call of a session, the resume feature (1.1.0) moves the last session's
+# track to the front of the queue and plays it from the saved position.
 func play(volume: float = player.volume_db) -> void:
+	var resume_pos: float = -1.0
+
+	if not _resume_applied:
+		resume_pos = _prepare_resume()
+
 	if _play_queue.empty():
 		_fill_play_queue()
 
@@ -67,15 +88,22 @@ func play(volume: float = player.volume_db) -> void:
 	var next_stream = _play_queue.pop_front()
 
 	# Avoid immediate repeats when there is more than one track;
-	# with a single track the same stream replays forever.
-	if next_stream == player.stream and not _play_queue.empty():
+	# with a single track the same stream replays forever. Skipped on
+	# resume so the saved track is really the one that plays.
+	if resume_pos < 0.0 and next_stream == player.stream and not _play_queue.empty():
 		var swap_stream = _play_queue.pop_front()
 		_play_queue.push_back(next_stream)
 		next_stream = swap_stream
 
 	player.stream = next_stream
 	player.volume_db = -20
-	player.play()
+	_current_track_name = _queue_track_name(next_stream)
+
+	if resume_pos >= 0.0:
+		player.play(resume_pos)
+	else:
+		player.play()
+
 	tween(volume)
 
 
@@ -92,11 +120,14 @@ func on_custom_music_setting_changed(setting_name, value, mod_name) -> void:
 		_shuffle = is_shuffle_value(value)
 		_play_queue = []
 		ModLoaderLog.info("Shuffle changed to " + str(value), RobocrafterLP_CustomMusic_LOG_NAME)
+	elif setting_name == CONFIG_KEY_RESUME:
+		_resume_enabled = is_resume_value(value)
+		ModLoaderLog.info("Resume changed to " + str(value), RobocrafterLP_CustomMusic_LOG_NAME)
 	elif setting_name == CONFIG_KEY_IMPORT_PATH:
 		open_music_folder()
 
 	if _config != null:
-		if setting_name == CONFIG_KEY_MUSIC_MODE or setting_name == CONFIG_KEY_SHUFFLE or setting_name == CONFIG_KEY_IMPORT_PATH:
+		if setting_name == CONFIG_KEY_MUSIC_MODE or setting_name == CONFIG_KEY_SHUFFLE or setting_name == CONFIG_KEY_RESUME or setting_name == CONFIG_KEY_IMPORT_PATH:
 			_config.data[setting_name] = value
 			var _save_error = _config.save_to_file()
 
@@ -171,6 +202,7 @@ func load_custom_tracks() -> void:
 			ModLoaderLog.error("Track is not valid OGG Vorbis (renamed MP3/Opus?), skipped: " + ogg_file, RobocrafterLP_CustomMusic_LOG_NAME)
 		else:
 			_custom_tracks.append(stream)
+			_track_names[stream] = ogg_file
 			ModLoaderLog.info("Loaded track: " + ogg_file + " (" + str(bytes.size()) + " bytes)", RobocrafterLP_CustomMusic_LOG_NAME)
 
 	if not ignored_files.empty():
@@ -193,6 +225,9 @@ func _read_config() -> void:
 
 	if _config.data.has(CONFIG_KEY_SHUFFLE):
 		_shuffle = is_shuffle_value(_config.data[CONFIG_KEY_SHUFFLE])
+
+	if _config.data.has(CONFIG_KEY_RESUME):
+		_resume_enabled = is_resume_value(_config.data[CONFIG_KEY_RESUME])
 
 
 func _fill_play_queue() -> void:
@@ -234,3 +269,122 @@ func get_vanilla_tracks() -> Array:
 			tracks.append_array(dlc_data.music_tracks.duplicate())
 
 	return tracks
+
+
+# --- Resume (1.1.0): continue the last session's track at the saved position.
+# The position is written to user://custom_music_resume.cfg every
+# RESUME_SAVE_INTERVAL seconds while an identifiable track plays. On the
+# next game start, the saved track moves to the front of the first play
+# queue and continues from that position. Custom tracks are identified by
+# their file name, vanilla/DLC tracks by their resource path (vanilla
+# tracks without a resource path simply do not update the state file).
+
+func is_resume_value(value) -> bool:
+	return value == true
+
+
+func _start_resume_save_timer() -> void:
+	_resume_save_timer = Timer.new()
+	_resume_save_timer.wait_time = RESUME_SAVE_INTERVAL
+	_resume_save_timer.autostart = true
+	var _error = _resume_save_timer.connect("timeout", self, "_on_resume_save_timer_timeout")
+	add_child(_resume_save_timer)
+
+
+func _on_resume_save_timer_timeout() -> void:
+	_save_resume_state()
+
+
+func _load_resume_state() -> void:
+	_resume_track = ""
+	_resume_position = 0.0
+	var state_file: ConfigFile = ConfigFile.new()
+
+	if state_file.load(RESUME_STATE_PATH) != OK:
+		return
+
+	var saved_track = state_file.get_value("resume", "track", "")
+	var saved_position = state_file.get_value("resume", "position", 0.0)
+
+	if typeof(saved_track) == TYPE_STRING and typeof(saved_position) == TYPE_REAL:
+		_resume_track = String(saved_track)
+		_resume_position = float(saved_position)
+
+	if _resume_track != "" and _resume_position > 0.0:
+		ModLoaderLog.info("Resume found last session at: " + _resume_track + " (" + _format_seconds(_resume_position) + ")", RobocrafterLP_CustomMusic_LOG_NAME)
+
+
+func _save_resume_state() -> void:
+	if not _resume_enabled:
+		return
+
+	# Nothing identifiable is playing: keep the previous state file
+	# (e.g. a vanilla track without resource_path does not overwrite it).
+	if not player.playing or _current_track_name == "":
+		return
+
+	var position: float = player.get_playback_position()
+
+	if position <= 0.0:
+		return
+
+	var state_file: ConfigFile = ConfigFile.new()
+	state_file.set_value("resume", "track", _current_track_name)
+	state_file.set_value("resume", "position", position)
+	var _error = state_file.save(RESUME_STATE_PATH)
+
+
+func _prepare_resume() -> float:
+	# Runs once per session (first play() call).
+	_resume_applied = true
+
+	if not _resume_enabled or _resume_track == "" or _resume_position <= 0.0:
+		_resume_track = ""
+		_resume_position = 0.0
+		return -1.0
+
+	if _play_queue.empty():
+		_fill_play_queue()
+
+	if _play_queue.empty():
+		ModLoaderLog.info("Resume skipped: play queue is empty", RobocrafterLP_CustomMusic_LOG_NAME)
+		return -1.0
+
+	var found_index: int = -1
+
+	for i in range(_play_queue.size()):
+		if _queue_track_name(_play_queue[i]) == _resume_track:
+			found_index = i
+			break
+
+	var resume_position: float = _resume_position
+	var resume_track: String = _resume_track
+	_resume_track = ""
+	_resume_position = 0.0
+
+	if found_index < 0:
+		ModLoaderLog.info("Resume: '" + resume_track + "' not found in the current queue, starting fresh", RobocrafterLP_CustomMusic_LOG_NAME)
+		return -1.0
+
+	var resume_stream = _play_queue[found_index]
+	_play_queue.remove(found_index)
+	_play_queue.push_front(resume_stream)
+	ModLoaderLog.info("Resume: continuing '" + resume_track + "' at " + _format_seconds(resume_position), RobocrafterLP_CustomMusic_LOG_NAME)
+	return resume_position
+
+
+func _queue_track_name(stream) -> String:
+	if _track_names.has(stream):
+		return String(_track_names[stream])
+
+	# Vanilla/DLC tracks: identify by resource path (empty for custom
+	# streams, which are covered by the lookup above).
+	var res_path: String = String(stream.resource_path)
+	return res_path
+
+
+func _format_seconds(seconds: float) -> String:
+	var total: int = int(seconds)
+	var mins: int = total / 60
+	var secs: int = total % 60
+	return str(mins) + ":" + ("%02d" % secs)
