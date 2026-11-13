@@ -100,9 +100,10 @@ func is_item_deferred_next_wave_blocked(item_data) -> bool:
 
 func get_locked_shop_item_count(item_data: ItemData, player_index: int) -> int:
 	# Copies of item_data currently LOCKED on the player's shop shelf. Locked
-	# items persist into the next shop phase and can still be bought there,
-	# so they count against limited-item slots (the crate-dialog equivalent
-	# of the shop shelf rule from 1.3.2).
+	# items persist into the next shop phase and can still be bought there.
+	# 1.3.5: no longer used for limit checks (transfers count owned copies
+	# only; the shop buy guard blocks buying a locked shelf copy while the
+	# player is at max_nb). Kept as a helper for future/debug use.
 	var count := 0
 	if item_data == null:
 		return 0
@@ -110,14 +111,3 @@ func get_locked_shop_item_count(item_data: ItemData, player_index: int) -> int:
 		if locked_item is Array and locked_item.size() > 0 and locked_item[0] is ItemData and locked_item[0].my_id_hash == item_data.my_id_hash:
 			count += 1
 	return count
-
-
-func get_remaining_max_nb_item_with_locked(item_data: ItemData, player_index: int) -> int:
-	# Limited-item slots remaining for player_index, counting owned copies
-	# AND locked shelf copies. Unlimited items keep their LARGE_NUMBER.
-	if item_data == null:
-		return 0
-	var remaining: int = self.get_remaining_max_nb_item(item_data, player_index)
-	if item_data.max_nb != -1:
-		remaining = max(0, remaining - self.get_locked_shop_item_count(item_data, player_index))
-	return remaining

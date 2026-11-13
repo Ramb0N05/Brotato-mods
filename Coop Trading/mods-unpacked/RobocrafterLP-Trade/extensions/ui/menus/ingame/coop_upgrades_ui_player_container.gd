@@ -4,8 +4,11 @@ signal item_trade_button_pressed(item_data)
 
 # 1.3.3: give-buttons are gated per item now, mirroring the shop rules
 # (RunData.is_item_trade_restricted / is_item_deferred_next_wave_blocked /
-# limited-item checks incl. locked shelf copies). The press handler re-checks
-# as a backstop because receiver state can change between waves.
+# limited-item checks). The press handler re-checks as a backstop because
+# receiver state can change between waves.
+# 1.3.5: limited-item check counts owned copies only (the locked-shelf-copy
+# counting is gone); buying a still-offered shelf copy while at max_nb is
+# blocked by the shop buy guard in the shop_items_container extension instead.
 
 var _trade_buttons := {}
 
@@ -39,7 +42,9 @@ func show_item(item_data: ItemParentData) -> void :
 
 func _update_trade_buttons_visibility() -> void :
 	# Hide the give-buttons for items that must not change owner and for
-	# limited items the target cannot receive (owned + locked copies count).
+	# limited items the target cannot receive (owned copies count; buying a
+	# still-offered shelf copy while at max_nb is blocked by the shop buy
+	# guard in the shop_items_container extension since 1.3.5).
 	if _trade_buttons.empty():
 		return
 	for target_index in _trade_buttons.keys():
@@ -59,7 +64,7 @@ func _can_give_item_to(item_data, to: int) -> bool:
 	if RunData.is_item_deferred_next_wave_blocked(item_data):
 		return false
 	if item_data.max_nb != -1:
-		if RunData.get_remaining_max_nb_item_with_locked(item_data, to) <= 0:
+		if RunData.get_remaining_max_nb_item(item_data, to) <= 0:
 			return false
 	return true
 

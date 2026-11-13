@@ -57,6 +57,12 @@ extends CoopItemPopup
 #    ("The assigned value doesn't have a set type") - this killed the whole
 #    script at load time. Both 1.3.3 guards use an explicit `: bool`
 #    annotation instead. No behaviour change.
+#  - 1.3.5: limited items are tradable while the receiver's shop offers a
+#    copy. The 1.3.2 shelf rule (trade blocked when the receiver's shelf
+#    offers the item) is replaced by a shop buy guard in the
+#    shop_items_container extension: buying/stealing the shelf copy is
+#    blocked (like the vanilla insufficient-currency guard, BEFORE any
+#    materials are deducted) while the player owns max_nb copies.
 
 signal weapon_trade_button_pressed_coop(weapon_data, from_player_index, to_player_index)
 signal item_trade_button_pressed_coop(item_data, from_player_index, to_player_index)
@@ -429,7 +435,7 @@ func _can_trade_to(item_data, target_player_index: int) -> bool:
 		if not RunData.is_can_trade_item(item_data, target_player_index):
 			return false
 		# TRADE_ITEMS_OVER_LIMIT explicitly allows receiving over the limit:
-		# skip the strict vanilla-parity checks (incl. the shop shelf rule).
+		# skip the strict vanilla-parity checks (owned-count limit).
 		if RunData.get("is_trade_items_over_limit") == true:
 			return true
 		return _can_item_be_received(item_data, target_player_index)
@@ -437,40 +443,12 @@ func _can_trade_to(item_data, target_player_index: int) -> bool:
 
 
 func _can_item_be_received(item_data: ItemData, target_player_index: int) -> bool:
-	var remaining = RunData.get_remaining_max_nb_item(item_data, target_player_index)
-	if item_data.max_nb != -1:
-		# The receiver's shop shelf can already offer the same limited item
-		# (rolled before the trade happened). Vanilla only excludes limited
-		# items from future rolls (owned + locked count, item_service
-		# get_limited_items) and never re-checks max_nb at purchase time, so
-		# receiving a copy while the shelf offers one would allow buying over
-		# max_nb. The shelf copy therefore counts against the receiver's
-		# remaining slots for trades.
-		var shelf_count = _get_target_shelf_item_count(item_data, target_player_index)
-		remaining = max(0, remaining - shelf_count)
-	return remaining > 0
-
-
-func _get_target_shelf_item_count(item_data: ItemData, target_player_index: int) -> int:
-	# Copies of item_data currently displayed on the target's shop shelf
-	# (locked or not; ShopItem.item_data), same id.
-	var container = _get_player_container(target_player_index)
-	if container == null:
-		return 0
-	var shop_items_container = container.get("shop_items_container")
-	if shop_items_container == null:
-		return 0
-	var shop_items = shop_items_container.get("_shop_items")
-	if not (shop_items is Array):
-		return 0
-	var count := 0
-	for shop_item in shop_items:
-		if shop_item == null:
-			continue
-		var shelf_item = shop_item.get("item_data")
-		if shelf_item is ItemData and shelf_item.my_id_hash == item_data.my_id_hash:
-			count += 1
-	return count
+	# 1.3.5: plain owned-count check. The old 1.3.2 shelf rule (counting the
+	# receiver's shop shelf copies against the trade receive check) is gone:
+	# trades work while the receiver's shop offers the item, and the shop
+	# buy guard in the shop_items_container extension blocks BUYING the shelf
+	# copy while the player is at max_nb (no materials deducted).
+	return RunData.get_remaining_max_nb_item(item_data, target_player_index) > 0
 
 
 func _get_trade_block_reason(item_data, target_player_index: int) -> String:
@@ -482,10 +460,6 @@ func _get_trade_block_reason(item_data, target_player_index: int) -> String:
 	if item_data is ItemData:
 		if not RunData.is_can_trade_item(item_data, target_player_index):
 			return "item over max_nb (receiver)"
-		if item_data.max_nb != -1 and _get_target_shelf_item_count(item_data, target_player_index) > 0:
-			var remaining = RunData.get_remaining_max_nb_item(item_data, target_player_index)
-			if remaining - _get_target_shelf_item_count(item_data, target_player_index) <= 0:
-				return "item over max_nb (receiver shop offers it)"
 		return "item not eligible"
 	return "not tradeable"
 
